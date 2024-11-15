@@ -13,14 +13,10 @@ from pydantic import BaseModel, Field
 from IPython.display import Image, display
 from datasets import load_dataset
 import json
+from dotenv import load_dotenv
+load_dotenv()
 
-# Environment settings
-os.environ.update({
-    "CUDA_VISIBLE_DEVICES": "7",
-    "LANGCHAIN_TRACING_V2": "true",
-    "LANGCHAIN_PROJECT": "Discuss Prompt Injection",
-    "LANGCHAIN_API_KEY": "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",
-})
+os.environ["LANGCHAIN_PROJECT"] = "Discuss Gen2Det PromptInjection"
 
 class AgentInformation:
     # JSONファイルを読み込む関数
