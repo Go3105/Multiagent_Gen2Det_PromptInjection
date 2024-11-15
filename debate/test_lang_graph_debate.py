@@ -7,6 +7,7 @@ from langchain_community.chat_models import ChatLlamaCpp
 from langchain_core.messages import HumanMessage, BaseMessage
 from langchain_experimental.tools import PythonREPLTool
 from langgraph.graph import END, StateGraph, START
+from langgraph.graph.message import add_messages
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -14,14 +15,10 @@ from pydantic import BaseModel, Field
 from IPython.display import Image, display
 from datasets import load_dataset
 import json
+from dotenv import load_dotenv
+load_dotenv()
 
-# Environment settings
-os.environ.update({
-    "CUDA_VISIBLE_DEVICES": "7",
-    "LANGCHAIN_TRACING_V2": "true",
-    "LANGCHAIN_PROJECT": "Discuss Prompt Injection",
-    "LANGCHAIN_API_KEY": "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",
-})
+os.environ["LANGCHAIN_PROJECT"] = "Discuss Gen2Det PromptInjection"
 
 class AgentInformation:
     # JSONファイルを読み込む関数
@@ -42,14 +39,15 @@ class routeResponse(BaseModel):
 
 # Define agent states
 class AgentState(TypedDict):
+    #messages: Annotated[list[BaseMessage], add_messages]
+    messages: Annotated[list[BaseMessage], operator.add]
     next: str
-    messages:  Annotated[list[BaseMessage], operator.add]
 
 class CreateMultiAgent:
     def __init__(self, temperature, model_path, n_ctx, n_gpu_layers, n_batch, max_tokens, n_threads):
         # モデルの初期化
-        self.agents_name_list = AgentInformation.load_agent_names("/home/g-sato/llama_cpp_agent_1/debate/agent_info.json")
-        self.agents_info_dict = AgentInformation.load_agent_info("/home/g-sato/llama_cpp_agent_1/debate/agent_info.json")
+        self.agents_name_list = AgentInformation.load_agent_names("/home/g-sato/MultiAgent_Gen2Det_PromptInjection/debate/agent_info.json")
+        self.agents_info_dict = AgentInformation.load_agent_info("/home/g-sato/MultiAgent_Gen2Det_PromptInjection/debate/agent_info.json")
         self.next_system_prompt = None
         self.previous_speaker = None
         self.memory = MemorySaver()
@@ -66,7 +64,7 @@ class CreateMultiAgent:
         )   
 
     def create_supervisor_agent(self, state:AgentState):
-        self.options = ["FINISH", *self.agents_name_list]
+        option = ["FINISH", *self.agents_name_list]
         prompt = ChatPromptTemplate.from_messages(
             [
                 (
@@ -75,18 +73,18 @@ class CreateMultiAgent:
                     f" following workers: {multi_agent.agents_name_list}. Given the following user request,"
                     " respond with the worker to act next. Each worker will perform a"
                     " task and respond with their results and status. It is most important that you must select a different person from the one who spoke previously. "
-                    "When finished, respond with FINISH."),
+                ),
                     MessagesPlaceholder(variable_name="messages"),
                     MessagesPlaceholder("chat_history", optional= True),
                 (
                     "human",
                     "Given the conversation above, who should act next?"
-                    #f"The previous speaker was: {self.previous_speaker}. "
-                    " You must select a different person from the one who spoke previously."
-                    " Or should we FINISH? If the same type of statement is repeated three times in a row, please finish the discussion.Select one of: {options}",
+                    f"The previous speaker was: {self.previous_speaker}. "
+                    " You must select a different name person from the one who spoke previously."
+                    "If you feel that the discussion has reached a conclusion, please designate 'Judge_Agent' as the next speaker. Then, be sure to specify 'FINISH' immediately afterward.Select one of: {options}",
                 ),
             ]
-        ).partial(options=str(self.options), members=", ".join(self.agents_name_list))
+        ).partial(options=str(option), members=", ".join(AgentInformation.load_agent_names("/home/g-sato/MultiAgent_Gen2Det_PromptInjection/debate/agent_info.json")))
         supervisor_chain = prompt | self.llm.with_structured_output(routeResponse)
         result = supervisor_chain.invoke(state)
         #supervisor_agentによって決定された次の発言者の名前
@@ -99,6 +97,7 @@ class CreateMultiAgent:
     
     def agent_node(state:AgentState, agent, name):
         result = agent.invoke(state)
+        #state["messages"].append(HumanMessage(content=result["messages"][-1].content, name=name))
         return {
             "messages": [HumanMessage(content=result["messages"][-1].content, name=name)]
         }
@@ -106,8 +105,8 @@ class CreateMultiAgent:
     def agent_workflow(self):
         for name in self.agents_name_list:
             #state_modifierで各エージェントにシステムプロンプト(役割)を与える
-            agent = create_react_agent(self.llm, tools=[PythonREPLTool()], state_modifier=self.agents_info_dict.get(name), checkpointer=self.memory)
-            node = functools.partial(self.agent_node, agent=agent, name=name)
+            agent = create_react_agent(self.llm, tools=[PythonREPLTool()], state_modifier=self.agents_info_dict.get(name))
+            node = functools.partial(CreateMultiAgent.agent_node, agent=agent, name=name)
             self.workflow.add_node(name, node)
             self.workflow.add_edge(name, "supervisor")
         supervisor_agent = functools.partial(self.create_supervisor_agent)
@@ -121,22 +120,27 @@ class CreateMultiAgent:
     def graph(self, input, output):
         # Compile and run the graph
         graph = self.workflow.compile(checkpointer=self.memory)
-        config = {"configurable": {"thread_id": "1"}}
+        # config = {"configurable": {"thread_id": "1"}}
+        config = {
+        "configurable": {"thread_id": "1"},
+        "recursion_limit": 100
+        }
+
 
         #写真を保存
         #display(Image(graph.get_graph().draw_mermaid_png(output_file_path="workflow.png")))
-    
-        for message in graph.stream(
-            {
-                "messages": [HumanMessage(content=(
+
+        initial_state = {
+            "messages": [HumanMessage(content=
+                (
                     f"Input : {input}\n"
                     f"Output : {output}\n"
                     "Based on the content of the input and output above, fulfill the role assigned to you."
-                ))]    
-            },
-            # {"recursion_limit": 100},
-            config,
-        ):
+                )
+                )]}
+    
+        for message in graph.stream(initial_state, config):
+            
             if "__end__" not in message:
                 print(message)
                 print("----")
@@ -145,14 +149,15 @@ class CreateMultiAgent:
 if __name__ == "__main__":
     # Create multi-agent instance
     multi_agent = CreateMultiAgent(
-        temperature=0.3,
-        #model_path ="/home/g-sato/llama_cpp_agent_1/model/mistral-7b-instruct-v0.2.Q5_K_M.gguf",
-        model_path="/home/g-sato/llama_cpp_agent_1/model/llama-2-7b-chat.Q5_K_M.gguf",
-        #model_path="/home/g-sato/llama_cpp_agent_1/model/Meta-Llama-3-8B-Instruct.Q5_K_M.gguf",
+        temperature=0.5,
+        #model_path ="/home/g-sato/MultiAgent_Gen2Det_PromptInjection/model/mistral-7b-instruct-v0.2.Q5_K_M.gguf",
+        #model_path="/home/g-sato/MultiAgent_Gen2Det_PromptInjection/model/llama-2-7b-chat.Q5_K_M.gguf",
+        #model_path="/home/g-sato/MultiAgent_Gen2Det_PromptInjection/model/Meta-Llama-3-8B-Instruct.Q5_K_M.gguf",
+        model_path = "/home/g-sato/MultiAgent_Gen2Det_PromptInjection/model/Meta-Llama-3-8B-Instruct.Q8_0.gguf",
         n_ctx=10000,
         n_gpu_layers=-1,
         n_batch=32,
-        max_tokens=256,
+        max_tokens=128,
         n_threads=10,
     )
 
